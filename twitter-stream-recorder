@@ -179,27 +179,20 @@ sub stream {
 			$cv->end;
 		},
 		on_tweet        => sub {
-			handle_common(@_);
+			print encode_json(shift) . "\n";
 			eval {
 				my ($tweet) = @_;
 				my $id = $tweet->{id};
-				if($id > $highest_id) {
+				if(defined $id && $id > $highest_id) {
 					$highest_id = $id;
 				}
 			};
 			warn $@ if $@;
 		},
-		on_delete       => \&handle_common,
-		on_direct_message => \&handle_common,
-		on_event        => \&handle_common,
 		on_friends      => sub { },
 	);
 
 	return ($cv, $listener);
-}
-
-sub handle_common {
-	print encode_json(shift) . "\n";
 }
 
 if(-e $file) {
