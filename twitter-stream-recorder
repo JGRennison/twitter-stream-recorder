@@ -1,0 +1,216 @@
+#!/usr/bin/perl
+
+############################################################################
+##  Twitter stream recorder
+##
+##  This program is free software; you can redistribute it and/or modify
+##  it under the terms of the GNU General Public License as published by
+##  the Free Software Foundation; either version 2 of the License, or
+##  (at your option) any later version. See: COPYING-GPL.txt
+##
+##  This program  is distributed in the  hope that it will  be useful, but
+##  WITHOUT   ANY  WARRANTY;   without  even   the  implied   warranty  of
+##  MERCHANTABILITY  or FITNESS  FOR A  PARTICULAR PURPOSE.   See  the GNU
+##  General Public License for more details.
+##
+##  You should have received a copy of the GNU General Public License
+##  along with this program. If not, see <http:##www.gnu.org/licenses/>.
+##
+##  2015 - Jonathan G Rennison <j.g.rennison@gmail.com>
+############################################################################
+
+use strict;
+use warnings;
+use utf8;
+
+use JSON;
+use AnyEvent;
+use AnyEvent::Twitter 0.63;
+use AnyEvent::Twitter::Stream;
+use Getopt::Std;
+use File::Slurp;
+use File::HomeDir;
+
+my $consumer_key    = q(rzAkUMSeOG9dtp85cywZZDisb);
+# This is totally a secret...
+my $consumer_secret = q(fMxkxJ5HrBY1f4XQE1Oux0VAOMPDhRmLFBzVndhedjRohiUbRa) =~ tr/n-za-mN-ZA-M/a-zA-Z/r;
+my $access_token;
+my $access_token_secret;
+my $user_json;
+my $highest_id = 0;
+my $file = File::Spec->catfile(File::HomeDir->my_home, '.twitter-stream-recorder');
+
+sub usage {
+	print STDERR <<"EOL";
+twitter-stream-recorder [options]
+Prints a twitter streaing API userstream to STDOUT.
+
+Options:
+-f CONFIG_FILE
+	Use CONFIG_FILE for API authorisation details.
+	Will not overwrite an existing file.
+	If the file does not exist, the user must
+	interactively authorise the application (enter a PIN on STDIN).
+	Defaults to $file
+-h
+	Show usage
+EOL
+	exit 1;
+}
+
+my %opts;
+getopts(':f:h', \%opts) or usage();
+usage() if defined $opts{'h'};
+$file = $opts{'f'} if defined $opts{'f'};
+
+sub authorise {
+	# This is mostly based on AnyEvent::Twitter example code
+
+	my %request_token;
+	my $cv = AE::cv;
+	$cv->begin;
+	AnyEvent::Twitter->get_request_token(
+		consumer_key    => $consumer_key,
+		consumer_secret => $consumer_secret,
+		callback_url    => 'oob',
+		cb => sub {
+			my ($location, $response, $body, $header) = @_;
+			%request_token = %$response;
+
+			print "\n",
+				  "Access the authorization URL and get the PIN at \n\n",
+				  "$location\n\n";
+
+			$cv->end;
+		},
+	);
+	$cv->recv;
+
+	print "Input the PIN:\n";
+	my $pin = <STDIN>;
+	chomp $pin;
+
+	$cv = AE::cv;
+	$cv->begin;
+	AnyEvent::Twitter->get_access_token(
+		consumer_key       => $consumer_key,
+		consumer_secret    => $consumer_secret,
+		oauth_token        => $request_token{oauth_token},
+		oauth_token_secret => $request_token{oauth_token_secret},
+		oauth_verifier     => $pin,
+		cb => sub {
+			my ($token, $body, $header) = @_;
+			$access_token         = $token->{oauth_token};
+			$access_token_secret  = $token->{oauth_token_secret};
+			$cv->end;
+		},
+	);
+	$cv->recv;
+
+	my $ua = get_ae_twitter();
+	my ($vc_cv) = verify_cred($ua);
+	$vc_cv->recv;
+
+	print "\n",
+	      "access_token        is $access_token\n",
+	      "access_token_secret is $access_token_secret\n",
+	      "user ID is " . $user_json->{id} . "\n",
+	      "user screen_name is @" . $user_json->{screen_name} . "\n\n";
+
+	my %new = (
+		consumer_key    => $consumer_key,
+		consumer_secret => $consumer_secret,
+		token           => $access_token,
+		token_secret    => $access_token_secret,
+		user_id         => $user_json->{id},
+	);
+	write_file($file, { no_clobber => 1, err_mode => 'carp' }, encode_json(\%new));
+}
+
+sub load_config {
+	my $config = decode_json(read_file($file));
+	$consumer_key = $config->{consumer_key};
+	$consumer_secret = $config->{consumer_secret};
+	$access_token = $config->{token};
+	$access_token_secret = $config->{token_secret};
+}
+
+sub get_ae_twitter {
+	my $ua = AnyEvent::Twitter->new(
+		consumer_key    => $consumer_key,
+		consumer_secret => $consumer_secret,
+		token           => $access_token,
+		token_secret    => $access_token_secret,
+	);
+	return $ua;
+}
+
+sub verify_cred {
+	my ($ua, $use_cv) = @_; # use_cv is optional
+	my $cv = $use_cv // AE::cv;
+
+	$cv->begin;
+	$ua->get('account/verify_credentials', sub {
+		my ($header, $response, $reason) = @_;
+		$user_json = $response;
+		$cv->end;
+	});
+	return ($cv);
+}
+
+sub stream {
+	my ($ua, $use_cv) = @_; # use_cv is optional
+	my $cv = $use_cv // AE::cv;
+
+	$cv->begin;
+	my $listener = AnyEvent::Twitter::Stream->new(
+		consumer_key    => $consumer_key,
+		consumer_secret => $consumer_secret,
+		token           => $access_token,
+		token_secret    => $access_token_secret,
+		method          => "userstream",
+		timeout         => 180,
+		on_eof          => sub {
+			$cv->end;
+		},
+		on_error        => sub {
+			my ($error) = @_;
+			warn "Streaming error: $error";
+			$cv->end;
+		},
+		on_tweet        => sub {
+			handle_common(@_);
+			eval {
+				my ($tweet) = @_;
+				my $id = $tweet->{id};
+				if($id > $highest_id) {
+					$highest_id = $id;
+				}
+			};
+			warn $@ if $@;
+		},
+		on_delete       => \&handle_common,
+		on_direct_message => \&handle_common,
+		on_event        => \&handle_common,
+		on_friends      => sub { },
+	);
+
+	return ($cv, $listener);
+}
+
+sub handle_common {
+	print encode_json(shift) . "\n";
+}
+
+if(-e $file) {
+	load_config();
+	my ($vc_cv) = verify_cred(get_ae_twitter());
+	$vc_cv->recv;
+}
+else {
+	authorise();
+}
+
+my ($cv, $listener) = stream(get_ae_twitter());
+
+$cv->recv;
