@@ -30,6 +30,7 @@ use AnyEvent::Twitter::Stream;
 use Getopt::Std;
 use File::Slurp;
 use File::HomeDir;
+use String::Numeric;
 
 my $consumer_key    = q(rzAkUMSeOG9dtp85cywZZDisb);
 # This is totally a secret...
@@ -39,6 +40,7 @@ my $access_token_secret;
 my $user_json;
 my $highest_id = 0;
 my $file = File::Spec->catfile(File::HomeDir->my_home, '.twitter-stream-recorder');
+my $preload_tweets = 0;
 
 sub usage {
 	print STDERR <<"EOL";
@@ -55,6 +57,9 @@ Options:
 -n
 	Non-interactive mode.
 	Fail if interactive authorisation is required.
+-p INTEGER
+	Prepend this many tweets to the output (using the REST API).
+	Defaults to $preload_tweets
 -h
 	Show usage
 EOL
@@ -62,10 +67,28 @@ EOL
 }
 
 my %opts;
-getopts(':f:nh', \%opts) or usage();
+getopts(':f:np:h', \%opts) or usage();
 usage() if defined $opts{'h'};
 $file = $opts{'f'} if defined $opts{'f'};
 my $non_interactive = defined $opts{'n'};
+$preload_tweets = $opts{'p'} if defined $opts{'p'};
+
+unless(String::Numeric::is_int($preload_tweets) && $preload_tweets >= 0 && $preload_tweets <= 800) {
+	die("-p (tweets to pre-load) mut be an integer in the range 0-800");
+}
+
+my $rest_cv;
+my @rest_cv_pending; # stream tweets are pushed to end, REST tweets are unshifted to front
+
+sub setup_rest_cv {
+	return if $rest_cv && !$rest_cv->ready;
+
+	$rest_cv = AnyEvent->condvar;
+	$rest_cv->cb(sub {
+		print_json($_) for @rest_cv_pending;
+		@rest_cv_pending = ();
+	});
+}
 
 sub authorise {
 	# This is mostly based on AnyEvent::Twitter example code
@@ -163,7 +186,7 @@ sub verify_cred {
 }
 
 sub stream {
-	my ($ua, $use_cv) = @_; # use_cv is optional
+	my ($ua, $use_cv, $onconnect) = @_; # use_cv is optional
 	my $cv = $use_cv // AE::cv;
 
 	$cv->begin;
@@ -183,20 +206,88 @@ sub stream {
 			$cv->end;
 		},
 		on_tweet        => sub {
-			print encode_json(shift) . "\n";
-			eval {
-				my ($tweet) = @_;
-				my $id = $tweet->{id};
-				if(defined $id && $id > $highest_id) {
-					$highest_id = $id;
-				}
-			};
-			warn $@ if $@;
+			my ($tweet) = @_;
+			stream_print_json($tweet);
+			handle_tweet($tweet);
 		},
-		on_friends      => sub { },
+		on_friends      => sub {
+			$onconnect->() if $onconnect;
+		},
 	);
 
 	return ($cv, $listener);
+}
+
+sub handle_tweet {
+	my ($tweet) = @_;
+	eval {
+		my $id = $tweet->{id};
+		if(defined $id && $id > $highest_id) {
+			$highest_id = $id;
+		}
+	};
+	warn $@ if $@;
+}
+
+sub stream_print_json {
+	if($rest_cv->ready) {
+		print_json(shift);
+	}
+	else {
+		push @rest_cv_pending, shift;
+	}
+}
+
+sub rest_print_json {
+	unshift @rest_cv_pending, shift;
+}
+
+sub print_json {
+	my ($obj) = @_;
+	print encode_json($obj) . "\n";
+}
+
+sub rest_fetch {
+	my ($ua, $cv, $count, $max_id, $since_id) = @_;
+
+	my $more_pending = 1;
+	my %params = (
+		include_entities  => 1
+	);
+	$params{since_id} = $since_id if defined $since_id;
+	$params{max_id} = $max_id if defined $max_id;
+	if($count > 200) {
+		$params{count} = 200;
+	}
+	else {
+		$params{count} = $count;
+	}
+
+	# Most recent (highest ID) comes first
+	# Least recent (lowest ID) comes last
+	# First page will be the newest
+
+	$cv->begin;
+	$ua->get('statuses/home_timeline', \%params, sub {
+		my ($header, $response, $reason) = @_;
+		if(ref($response) eq "ARRAY") {
+			my $tweet_count = scalar @$response;
+			if($tweet_count) {
+				my $lowest_id = $response->[-1]->{id};
+				for my $tweet (@$response) {
+					rest_print_json($tweet);
+					handle_tweet($tweet);
+				}
+
+				if($count > 200 && $tweet_count > 150) {
+					# Possibly more tweets in next page
+					# Use 150 as threshold to deal with a few tweets being filtered out due to deletion, etc.
+					rest_fetch($ua, $cv, $count - 200, $lowest_id - 1, $since_id);
+				}
+			}
+		}
+		$cv->end;
+	});
 }
 
 if(-e $file) {
@@ -211,6 +302,17 @@ else {
 	authorise();
 }
 
-my ($cv, $listener) = stream(get_ae_twitter());
+setup_rest_cv();
+
+my $ua = get_ae_twitter();
+
+my ($cv, $listener) = stream($ua, undef, sub {
+	if($preload_tweets) {
+		rest_fetch($ua, $rest_cv, $preload_tweets, undef, undef);
+	}
+	else {
+		$rest_cv->send;
+	}
+});
 
 $cv->recv;
