@@ -52,6 +52,9 @@ Options:
 	If the file does not exist, the user must
 	interactively authorise the application (enter a PIN on STDIN).
 	Defaults to $file
+-n
+	Non-interactive mode.
+	Fail if interactive authorisation is required.
 -h
 	Show usage
 EOL
@@ -59,9 +62,10 @@ EOL
 }
 
 my %opts;
-getopts(':f:h', \%opts) or usage();
+getopts(':f:nh', \%opts) or usage();
 usage() if defined $opts{'h'};
 $file = $opts{'f'} if defined $opts{'f'};
+my $non_interactive = defined $opts{'n'};
 
 sub authorise {
 	# This is mostly based on AnyEvent::Twitter example code
@@ -199,6 +203,9 @@ if(-e $file) {
 	load_config();
 	my ($vc_cv) = verify_cred(get_ae_twitter());
 	$vc_cv->recv;
+}
+elsif($non_interactive) {
+	die("Not yet authorised, but currently in non-interactive mode.");
 }
 else {
 	authorise();
