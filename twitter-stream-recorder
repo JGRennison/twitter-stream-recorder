@@ -57,9 +57,16 @@ Options:
 -n
 	Non-interactive mode.
 	Fail if interactive authorisation is required.
+-r
+	Restart stream connection if it fails.
+-g
+	Use the REST API to fill any gaps between stream connections.
+	Implies: -r.
 -p INTEGER
 	Prepend this many tweets to the output (using the REST API).
 	Defaults to $preload_tweets
+-v
+	Verbose mode
 -h
 	Show usage
 EOL
@@ -67,11 +74,14 @@ EOL
 }
 
 my %opts;
-getopts(':f:np:h', \%opts) or usage();
+getopts(':f:nrgp:vh', \%opts) or usage();
 usage() if defined $opts{'h'};
 $file = $opts{'f'} if defined $opts{'f'};
 my $non_interactive = defined $opts{'n'};
 $preload_tweets = $opts{'p'} if defined $opts{'p'};
+my $restart_stream = defined $opts{'r'} || defined $opts{'g'};
+my $fill_stream_gaps = defined $opts{'g'};
+my $verbose = defined $opts{'v'};
 
 unless(String::Numeric::is_int($preload_tweets) && $preload_tweets >= 0 && $preload_tweets <= 800) {
 	die("-p (tweets to pre-load) mut be an integer in the range 0-800");
@@ -180,6 +190,7 @@ sub verify_cred {
 	$ua->get('account/verify_credentials', sub {
 		my ($header, $response, $reason) = @_;
 		if($response) {
+			print STDERR "verify_credentials successful\n" if $verbose;
 			$user_json = $response;
 		}
 		else {
@@ -192,11 +203,22 @@ sub verify_cred {
 }
 
 sub stream {
-	my ($ua, $use_cv, $onconnect) = @_; # use_cv is optional
-	my $cv = $use_cv // AE::cv;
+	my ($ua, $cv, $onconnect, $onend) = @_;
+
+	print STDERR "About to connect to stream\n" if $verbose;
+
+	setup_rest_cv();
+
+	my $listener;
+
+	my $end_stream = sub {
+		undef $listener;
+		$onend->() if $onend;
+		$cv->end;
+	};
 
 	$cv->begin;
-	my $listener = AnyEvent::Twitter::Stream->new(
+	$listener = AnyEvent::Twitter::Stream->new(
 		consumer_key    => $consumer_key,
 		consumer_secret => $consumer_secret,
 		token           => $access_token,
@@ -204,12 +226,13 @@ sub stream {
 		method          => "userstream",
 		timeout         => 180,
 		on_eof          => sub {
-			$cv->end;
+			warn "End of stream reached";
+			$end_stream->();
 		},
 		on_error        => sub {
 			my ($error) = @_;
 			warn "Streaming error: $error";
-			$cv->end;
+			$end_stream->();
 		},
 		on_tweet        => sub {
 			my ($tweet) = @_;
@@ -217,11 +240,10 @@ sub stream {
 			handle_tweet($tweet);
 		},
 		on_friends      => sub {
+			print STDERR "Stream connected\n" if $verbose;
 			$onconnect->() if $onconnect;
 		},
 	);
-
-	return ($cv, $listener);
 }
 
 sub handle_tweet {
@@ -281,6 +303,10 @@ sub retry {
 sub rest_fetch {
 	my ($ua, $cv, $count, $max_id, $since_id, $retry_count) = @_;
 
+	print STDERR "About to make REST API request\n" if $verbose;
+
+	$retry_count //= 0;
+
 	my $more_pending = 1;
 	my %params = (
 		include_entities  => 1
@@ -303,6 +329,7 @@ sub rest_fetch {
 		my ($header, $response, $reason, $error_response) = @_;
 		if(ref($response) eq "ARRAY") {
 			my $tweet_count = scalar @$response;
+			print STDERR "REST API: got $tweet_count tweets\n" if $verbose;
 			if($tweet_count) {
 				my $lowest_id = $response->[-1]->{id};
 				for my $tweet (@$response) {
@@ -318,13 +345,36 @@ sub rest_fetch {
 			}
 		}
 		else {
-			warn display_rest_error(@_) . "\nretrying";
+			warn get_rest_error(@_) . "\nretrying";
 			retry($cv, $retry_count, sub {
 				rest_fetch($ua, $cv, $count, $max_id, $since_id, $retry_count + 1);
 			});
 		}
 		$cv->end;
 	});
+}
+
+sub start_stream {
+	my ($ua, $cv, $rest_load_count, $retry_count) = @_;
+
+	my $stream_err_handler = sub {
+		my ($retry_count) = @_;
+
+		if($restart_stream) {
+			retry($cv, $retry_count, sub {
+				start_stream($ua, $cv, $fill_stream_gaps ? 800 : 0, $retry_count + 1);
+			});
+		}
+	};
+
+	stream($ua, $cv, sub {
+		if($rest_load_count) {
+			rest_fetch($ua, $rest_cv, $rest_load_count, undef, $highest_id || undef);
+		}
+		else {
+			$rest_cv->send;
+		}
+	}, sub { $stream_err_handler->($retry_count); });
 }
 
 if(-e $file) {
@@ -339,17 +389,6 @@ else {
 	authorise();
 }
 
-setup_rest_cv();
-
-my $ua = get_ae_twitter();
-
-my ($cv, $listener) = stream($ua, undef, sub {
-	if($preload_tweets) {
-		rest_fetch($ua, $rest_cv, $preload_tweets, undef, undef);
-	}
-	else {
-		$rest_cv->send;
-	}
-});
-
+my $cv = AE::cv;
+start_stream(get_ae_twitter(), $cv, $preload_tweets, 0);
 $cv->recv;
