@@ -179,7 +179,13 @@ sub verify_cred {
 	$cv->begin;
 	$ua->get('account/verify_credentials', sub {
 		my ($header, $response, $reason) = @_;
-		$user_json = $response;
+		if($response) {
+			$user_json = $response;
+		}
+		else {
+			warn get_rest_error(@_) . "\naborting";
+			exit(1);
+		}
 		$cv->end;
 	});
 	return ($cv);
@@ -247,8 +253,33 @@ sub print_json {
 	print encode_json($obj) . "\n";
 }
 
+sub get_rest_error {
+	my ($header, $response, $reason, $error_response) = @_;
+	my $err = "REST API error: failed to get: " . $header->{URL};
+	$err .= "\n\t$reason";
+	$err .= "\n\t" . $_->{code} . ": " . $_->{message} for @{$error_response->{errors}};
+	return $err;
+}
+
+sub retry {
+	my ($cv, $retry_count, $cb) = @_;
+
+	$retry_count = 6 if $retry_count > 6;
+	my $delay = 8 << $retry_count;
+
+	$cv->begin;
+	my $w; $w = AnyEvent->timer (
+		after    => $delay,
+		cb       => sub {
+			$cb->();
+			$cv->end;
+			undef $w;
+		},
+	);
+}
+
 sub rest_fetch {
-	my ($ua, $cv, $count, $max_id, $since_id) = @_;
+	my ($ua, $cv, $count, $max_id, $since_id, $retry_count) = @_;
 
 	my $more_pending = 1;
 	my %params = (
@@ -269,7 +300,7 @@ sub rest_fetch {
 
 	$cv->begin;
 	$ua->get('statuses/home_timeline', \%params, sub {
-		my ($header, $response, $reason) = @_;
+		my ($header, $response, $reason, $error_response) = @_;
 		if(ref($response) eq "ARRAY") {
 			my $tweet_count = scalar @$response;
 			if($tweet_count) {
@@ -285,6 +316,12 @@ sub rest_fetch {
 					rest_fetch($ua, $cv, $count - 200, $lowest_id - 1, $since_id);
 				}
 			}
+		}
+		else {
+			warn display_rest_error(@_) . "\nretrying";
+			retry($cv, $retry_count, sub {
+				rest_fetch($ua, $cv, $count, $max_id, $since_id, $retry_count + 1);
+			});
 		}
 		$cv->end;
 	});
