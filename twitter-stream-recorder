@@ -31,6 +31,9 @@ use Getopt::Std;
 use File::Slurp;
 use File::HomeDir;
 use String::Numeric;
+use DateTime;
+use DateTime::HiRes;
+use Memoize;
 
 my $consumer_key    = q(rzAkUMSeOG9dtp85cywZZDisb);
 # This is totally a secret...
@@ -67,6 +70,8 @@ Options:
 	Defaults to $preload_tweets
 -v
 	Verbose mode
+-t
+	Timestamp verbose and diagnostic output
 -h
 	Show usage
 EOL
@@ -74,7 +79,7 @@ EOL
 }
 
 my %opts;
-getopts(':f:nrgp:vh', \%opts) or usage();
+getopts(':f:nrgp:vth', \%opts) or usage();
 usage() if defined $opts{'h'};
 $file = $opts{'f'} if defined $opts{'f'};
 my $non_interactive = defined $opts{'n'};
@@ -82,9 +87,34 @@ $preload_tweets = $opts{'p'} if defined $opts{'p'};
 my $restart_stream = defined $opts{'r'} || defined $opts{'g'};
 my $fill_stream_gaps = defined $opts{'g'};
 my $verbose = defined $opts{'v'};
+my $ts_diag = defined $opts{'t'};
 
 unless(String::Numeric::is_int($preload_tweets) && $preload_tweets >= 0 && $preload_tweets <= 800) {
 	die("-p (tweets to pre-load) mut be an integer in the range 0-800");
+}
+
+sub get_localtz {
+	return DateTime::TimeZone->new(name => 'local');
+}
+memoize('get_localtz');
+
+sub now_timestamp {
+	return DateTime::HiRes->now(time_zone => get_localtz())->strftime("%F %T.%6N %z");
+}
+
+if($ts_diag) {
+	$SIG{__WARN__} = sub {
+		warn now_timestamp() . ": ", @_;
+	};
+	$SIG{__DIE__} = sub {
+		die now_timestamp() . ": ", @_;
+	};
+}
+
+sub log_verbose {
+	return unless $verbose;
+	unshift(@_, now_timestamp() . ": ") if $ts_diag;
+	print STDERR @_;
 }
 
 my $rest_cv;
@@ -190,7 +220,7 @@ sub verify_cred {
 	$ua->get('account/verify_credentials', sub {
 		my ($header, $response, $reason) = @_;
 		if($response) {
-			print STDERR "verify_credentials successful\n" if $verbose;
+			log_verbose("verify_credentials successful\n");
 			$user_json = $response;
 		}
 		else {
@@ -205,7 +235,7 @@ sub verify_cred {
 sub stream {
 	my ($ua, $cv, $onconnect, $onend) = @_;
 
-	print STDERR "About to connect to stream\n" if $verbose;
+	log_verbose("About to connect to stream\n");
 
 	setup_rest_cv();
 
@@ -240,7 +270,7 @@ sub stream {
 			handle_tweet($tweet);
 		},
 		on_friends      => sub {
-			print STDERR "Stream connected\n" if $verbose;
+			log_verbose("Stream connected\n");
 			$onconnect->() if $onconnect;
 		},
 	);
@@ -303,7 +333,7 @@ sub retry {
 sub rest_fetch {
 	my ($ua, $cv, $count, $max_id, $since_id, $retry_count) = @_;
 
-	print STDERR "About to make REST API request\n" if $verbose;
+	log_verbose("About to make REST API request\n");
 
 	$retry_count //= 0;
 
@@ -329,7 +359,7 @@ sub rest_fetch {
 		my ($header, $response, $reason, $error_response) = @_;
 		if(ref($response) eq "ARRAY") {
 			my $tweet_count = scalar @$response;
-			print STDERR "REST API: got $tweet_count tweets\n" if $verbose;
+			log_verbose("REST API: got $tweet_count tweets\n");
 			if($tweet_count) {
 				my $lowest_id = $response->[-1]->{id};
 				for my $tweet (@$response) {

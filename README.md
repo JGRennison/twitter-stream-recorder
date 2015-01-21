@@ -46,6 +46,9 @@
   * File::Slurp  
   * File::HomeDir  
   * String::Numeric  
+  * DateTime;  
+  * DateTime::HiRes;  
+  * Memoize;  
 
 ### License:
 GPLv2
