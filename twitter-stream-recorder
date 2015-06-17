@@ -457,6 +457,16 @@ sub setup_logging {
 	);
 }
 
+my $cv = AE::cv;
+
+my @sig_handlers;
+for my $sig ('TERM', 'INT', 'HUP') {
+	push @sig_handlers, AnyEvent->signal(signal => $sig, cb => sub {
+		print STDERR "Caught: SIG$sig\n";
+		exit 1;
+	});
+}
+
 if(-e $file) {
 	load_config();
 	my ($vc_cv) = verify_cred(get_ae_twitter());
@@ -475,6 +485,5 @@ scope_guard {
 	write_config();
 };
 
-my $cv = AE::cv;
 start_stream(get_ae_twitter(), $cv, $preload_tweets, 0);
 $cv->recv;
