@@ -12,8 +12,9 @@
 
 ### Options:
 * -f CONFIGFILE  
-  Use CONFIGFILE for API authorisation details.  
-  Will not overwrite an existing file.  
+  Use CONFIG_FILE for API authorisation details,  
+  and to store state between sessions.  
+  Will not overwrite an existing file for new authorisations.  
   If the file does not exist, the user must  
   interactively authorise the application (enter a PIN on STDIN).  
   Defaults to ~/.twitter-stream-recorder
@@ -26,7 +27,8 @@
   Use the REST API to fill any gaps between stream connections.  
   Implies: -r.
 * -p INTEGER  
-  Prepend this many tweets to the output (using the REST API).  
+  Prepend up to this many tweets to the output (using the REST API),  
+  up to the end of the previous session, if any.  
   Defaults to 0
 * -v  
   Verbose mode
@@ -59,6 +61,7 @@
   * DateTime  
   * DateTime::HiRes  
   * Memoize  
+  * Guard  
   * File::Write::Rotate [optional]  
   * File::Path [optional]  
 

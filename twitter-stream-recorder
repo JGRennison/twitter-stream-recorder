@@ -34,13 +34,14 @@ use String::Numeric;
 use DateTime;
 use DateTime::HiRes;
 use Memoize;
+use Guard;
 
 my $consumer_key    = q(rzAkUMSeOG9dtp85cywZZDisb);
 # This is totally a secret...
 my $consumer_secret = q(fMxkxJ5HrBY1f4XQE1Oux0VAOMPDhRmLFBzVndhedjRohiUbRa) =~ tr/n-za-mN-ZA-M/a-zA-Z/r;
 my $access_token;
 my $access_token_secret;
-my $user_json;
+my ($user_json, $user_id, $user_name);
 my $highest_id = 0;
 my $file = File::Spec->catfile(File::HomeDir->my_home, '.twitter-stream-recorder');
 my $preload_tweets = 0;
@@ -52,8 +53,9 @@ Prints a twitter streaming API userstream to STDOUT and/or to log files.
 
 Options:
 -f CONFIG_FILE
-	Use CONFIG_FILE for API authorisation details.
-	Will not overwrite an existing file.
+	Use CONFIG_FILE for API authorisation details,
+	and to store state between sessions.
+	Will not overwrite an existing file for new authorisations.
 	If the file does not exist, the user must
 	interactively authorise the application (enter a PIN on STDIN).
 	Defaults to $file
@@ -66,7 +68,8 @@ Options:
 	Use the REST API to fill any gaps between stream connections.
 	Implies: -r.
 -p INTEGER
-	Prepend this many tweets to the output (using the REST API).
+	Prepend up to this many tweets to the output (using the REST API),
+	up to the end of the previous session, if any.
 	Defaults to $preload_tweets
 -v
 	Verbose mode
@@ -195,14 +198,22 @@ sub authorise {
 	      "user ID is " . $user_json->{id} . "\n",
 	      "user screen_name is @" . $user_json->{screen_name} . "\n\n";
 
+	write_config(no_clobber => 1);
+}
+
+sub write_config {
+	my @args = @_;
 	my %new = (
 		consumer_key    => $consumer_key,
 		consumer_secret => $consumer_secret,
 		token           => $access_token,
 		token_secret    => $access_token_secret,
-		user_id         => $user_json->{id},
+		user_id         => $user_id,
+		user_name       => $user_name,
+		highest_id      => $highest_id,
 	);
-	write_file($file, { no_clobber => 1, err_mode => 'carp' }, encode_json(\%new));
+	write_file($file, { @args, atomic => 1, err_mode => 'carp' }, encode_json(\%new));
+	log_verbose("Wrote out config\n");
 }
 
 sub load_config {
@@ -211,6 +222,10 @@ sub load_config {
 	$consumer_secret = $config->{consumer_secret};
 	$access_token = $config->{token};
 	$access_token_secret = $config->{token_secret};
+	$user_id = $config->{user_id};
+	$user_name = $config->{user_name};
+	$highest_id = $config->{highest_id} // 0;
+	log_verbose("Read in config\n");
 }
 
 sub get_ae_twitter {
@@ -233,6 +248,8 @@ sub verify_cred {
 		if($response) {
 			log_verbose("verify_credentials successful\n");
 			$user_json = $response;
+			$user_id = $user_json->{id};
+			$user_name = $user_json->{screen_name};
 		}
 		else {
 			warn get_rest_error(@_) . "\naborting";
@@ -433,7 +450,7 @@ sub setup_logging {
 
 	$log = File::Write::Rotate->new(
 		dir => $log_dir,
-		prefix => 'twitter-stream-' . $user_json->{id} . '-' . $user_json->{screen_name},
+		prefix => "twitter-stream-$user_id-$user_name",
 		suffix => '.log',
 		period => 'daily',
 		lock_mode => 'exclusive',
@@ -453,6 +470,10 @@ else {
 }
 
 setup_logging();
+
+scope_guard {
+	write_config();
+};
 
 my $cv = AE::cv;
 start_stream(get_ae_twitter(), $cv, $preload_tweets, 0);
