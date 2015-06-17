@@ -48,7 +48,7 @@ my $preload_tweets = 0;
 sub usage {
 	print STDERR <<"EOL";
 twitter-stream-recorder [options]
-Prints a twitter streaming API userstream to STDOUT.
+Prints a twitter streaming API userstream to STDOUT and/or to log files.
 
 Options:
 -f CONFIG_FILE
@@ -72,6 +72,14 @@ Options:
 	Verbose mode
 -t
 	Timestamp verbose and diagnostic output
+-l DIRECTORY
+	Write stream to files in DIRECTORY.
+	This will output one log file per day with using filenames of
+	the form: twitter-stream-ID-NAME.YYYY-MM-DD.log
+	Requires File::Write::Rotate to be installed.
+-s
+	Do not write to STDOUT
+	This is useful when using -l to log to files.
 -h
 	Show usage
 EOL
@@ -79,7 +87,7 @@ EOL
 }
 
 my %opts;
-getopts(':f:nrgp:vth', \%opts) or usage();
+getopts(':f:nrgp:vtl:sh', \%opts) or usage();
 usage() if defined $opts{'h'};
 $file = $opts{'f'} if defined $opts{'f'};
 my $non_interactive = defined $opts{'n'};
@@ -88,6 +96,8 @@ my $restart_stream = defined $opts{'r'} || defined $opts{'g'};
 my $fill_stream_gaps = defined $opts{'g'};
 my $verbose = defined $opts{'v'};
 my $ts_diag = defined $opts{'t'};
+my $log_dir = $opts{'l'};
+my $no_stdout = defined $opts{'s'};
 
 unless(String::Numeric::is_int($preload_tweets) && $preload_tweets >= 0 && $preload_tweets <= 800) {
 	die("-p (tweets to pre-load) mut be an integer in the range 0-800");
@@ -119,6 +129,7 @@ sub log_verbose {
 
 my $rest_cv;
 my @rest_cv_pending; # stream tweets are pushed to end, REST tweets are unshifted to front
+my $log;
 
 sub setup_rest_cv {
 	return if $rest_cv && !$rest_cv->ready;
@@ -302,7 +313,9 @@ sub rest_print_json {
 
 sub print_json {
 	my ($obj) = @_;
-	print encode_json($obj) . "\n";
+	my $msg = encode_json($obj). "\n";
+	print $msg unless $no_stdout;
+	$log->write($msg) if defined $log;
 }
 
 sub get_rest_error {
@@ -407,6 +420,26 @@ sub start_stream {
 	}, sub { $stream_err_handler->($retry_count); });
 }
 
+sub setup_logging {
+	return unless defined $log_dir;
+
+	eval {
+		require File::Write::Rotate;
+		require File::Path;
+	};
+	die("File::Write::Rotate or File::Path is not available, cannot output logs.\n\n$@") if $@;
+
+	File::Path->make_path($log_dir, { mode => 0700 });
+
+	$log = File::Write::Rotate->new(
+		dir => $log_dir,
+		prefix => 'twitter-stream-' . $user_json->{id} . '-' . $user_json->{screen_name},
+		suffix => '.log',
+		period => 'daily',
+		lock_mode => 'exclusive',
+	);
+}
+
 if(-e $file) {
 	load_config();
 	my ($vc_cv) = verify_cred(get_ae_twitter());
@@ -418,6 +451,8 @@ elsif($non_interactive) {
 else {
 	authorise();
 }
+
+setup_logging();
 
 my $cv = AE::cv;
 start_stream(get_ae_twitter(), $cv, $preload_tweets, 0);
