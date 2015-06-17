@@ -48,7 +48,7 @@ my $preload_tweets = 0;
 sub usage {
 	print STDERR <<"EOL";
 twitter-stream-recorder [options]
-Prints a twitter streaing API userstream to STDOUT.
+Prints a twitter streaming API userstream to STDOUT.
 
 Options:
 -f CONFIG_FILE

@@ -30,6 +30,8 @@
   Defaults to 0
 * -v  
   Verbose mode
+* -t  
+  Timestamp verbose and diagnostic output
 * -h  
   Show usage
 
@@ -46,9 +48,9 @@
   * File::Slurp  
   * File::HomeDir  
   * String::Numeric  
-  * DateTime;  
-  * DateTime::HiRes;  
-  * Memoize;  
+  * DateTime  
+  * DateTime::HiRes  
+  * Memoize  
 
 ### License:
 GPLv2
