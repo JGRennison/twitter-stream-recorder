@@ -446,7 +446,7 @@ sub setup_logging {
 	};
 	die("File::Write::Rotate or File::Path is not available, cannot output logs.\n\n$@") if $@;
 
-	File::Path->make_path($log_dir, { mode => 0700 });
+	File::Path::make_path($log_dir, { mode => 0700 });
 
 	$log = File::Write::Rotate->new(
 		dir => $log_dir,
