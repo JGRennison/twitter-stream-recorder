@@ -25,7 +25,7 @@ use utf8;
 
 use JSON;
 use AnyEvent;
-use AnyEvent::Twitter 0.63;
+use AnyEvent::Twitter 0.64;
 use Getopt::Std;
 use File::Slurp;
 use File::HomeDir;
