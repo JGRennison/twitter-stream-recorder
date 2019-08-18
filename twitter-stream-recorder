@@ -295,7 +295,9 @@ sub rest_fetch {
 
 	my $more_pending = 1;
 	my %params = (
-		include_entities  => 1
+		include_entities  => 1,
+		tweet_mode        => "extended",
+		retweets          => "true",
 	);
 	$params{since_id} = $since_id if defined $since_id;
 	$params{max_id} = $max_id if defined $max_id;
